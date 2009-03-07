@@ -2,10 +2,6 @@ class CGI
   class Session
     class ActiveRecordStore
       class FastSessions
-        # Use the ActiveRecord::Base.connection by default.
-        cattr_accessor :connection
-        @@connection = ActiveRecord::Base.connection
-
         # The table name defaults to 'fast_sessions'.
         cattr_accessor :table_name
         @@table_name = 'fast_sessions'
@@ -32,23 +28,24 @@ class CGI
         # If record has not been found, we'll create a fake session with empty data
         # to prevent AR from creation of a new session record.
         def self.find_by_session_id(session_id)
-          rec = @@connection.select_one <<-end_sql, 'Load Session'
-            SELECT data
-              FROM #{@@table_name} 
-             WHERE session_id_crc = CRC32(#{@@connection.quote(session_id)})
-               AND session_id = #{@@connection.quote(session_id)}
-          end_sql
-          
-          if !rec && @@fallback_to_old_table
-            rec = @@connection.select_one <<-end_sql, 'Load Session (old)'
+          ActiveRecord::Base.connection_pool.with_connection do |connection|
+            rec = connection.select_one <<-end_sql, 'Load Session'
               SELECT data
-                FROM #{@@old_table_name} 
-               WHERE session_id = #{@@connection.quote(session_id)}
+                FROM #{@@table_name} 
+               WHERE session_id_crc = CRC32(#{connection.quote(session_id)})
+                 AND session_id = #{connection.quote(session_id)}
             end_sql
-          end
           
-          session_data = rec ? rec['data'] : nil
-          new(:session_id => session_id, :marshaled_data => session_data)
+            if !rec && @@fallback_to_old_table
+              rec = connection.select_one <<-end_sql, 'Load Session (old)'
+                SELECT data
+                  FROM #{@@old_table_name} 
+                 WHERE session_id = #{connection.quote(session_id)}
+              end_sql
+            end
+            session_data = rec ? rec['data'] : nil
+            new(:session_id => session_id, :marshaled_data => session_data)
+          end
         end
 
         # Marshaling functions
@@ -67,30 +64,36 @@ class CGI
           end
           
           # Creating table
-          @@connection.execute <<-end_sql
-            CREATE TABLE #{table_name} (
-              #{autoinc_id_field}
-              session_id_crc INT(10) UNSIGNED NOT NULL,
-              session_id VARCHAR(32) NOT NULL,
-              updated_at TIMESTAMP NOT NULL,
-              data TEXT,
-              #{autoinc_primary_key}
-              UNIQUE KEY `session_id` (session_id_crc, session_id),
-              KEY `updated_at` (`updated_at`)
-            ) ENGINE=InnoDB DEFAULT CHARSET=latin1;
-          end_sql
+          ActiveRecord::Base.connection_pool.with_connection do |connection|
+            connection.execute <<-end_sql
+              CREATE TABLE #{table_name} (
+                #{autoinc_id_field}
+                session_id_crc INT(10) UNSIGNED NOT NULL,
+                session_id VARCHAR(32) NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                data TEXT,
+                #{autoinc_primary_key}
+                UNIQUE KEY `session_id` (session_id_crc, session_id),
+                KEY `updated_at` (`updated_at`)
+              ) ENGINE=InnoDB DEFAULT CHARSET=latin1;
+            end_sql
+          end
         end
 
         # Drop session storage table
         def self.drop_table!
-          @@connection.execute "DROP TABLE #{table_name}"
+          ActiveRecord::Base.connection_pool.with_connection do |connection|
+            connection.execute "DROP TABLE #{table_name}"
+          end
         end
 
         # Delete old sessions from the storage table
         # _seconds_ parameter specifies how long you want to store your sessions.
         # By default, sessions stored for 1 week
         def self.delete_old!(seconds = 604800)
-          @@connection.execute "DELETE FROM #{table_name} WHERE updated_at < UNIX_TIMESTAMP(NOW()) - #{seconds}"
+          ActiveRecord::Base.connection_pool.with_connection do |connection|
+            connection.execute "DELETE FROM #{table_name} WHERE updated_at < UNIX_TIMESTAMP(NOW()) - #{seconds}"
+          end
         end
 
         #-----------------------------------------------------------------------
@@ -117,25 +120,29 @@ class CGI
           marshaled_data = self.class.marshal(data)
 
           # Save data to DB
-          @@connection.update <<-end_sql, 'Create/Update session'
-            INSERT INTO #{@@table_name} SET
-              data = #{@@connection.quote(marshaled_data)}, 
-              updated_at = NOW(),
-              session_id_crc = CRC32(#{@@connection.quote(session_id)}),
-              session_id = #{@@connection.quote(session_id)}
-            ON DUPLICATE KEY UPDATE
-              data = #{@@connection.quote(marshaled_data)}, 
-              updated_at = NOW()
-          end_sql
+          ActiveRecord::Base.connection_pool.with_connection do |connection|
+            connection.update <<-end_sql, 'Create/Update session'
+              INSERT INTO #{@@table_name} SET
+                data = #{connection.quote(marshaled_data)}, 
+                updated_at = NOW(),
+                session_id_crc = CRC32(#{connection.quote(session_id)}),
+                session_id = #{connection.quote(session_id)}
+              ON DUPLICATE KEY UPDATE
+                data = #{connection.quote(marshaled_data)}, 
+                updated_at = NOW()
+            end_sql
+          end
         end
 
         # Destroy current session record
         def destroy
-          @@connection.delete <<-end_sql, 'Destroy session'
-            DELETE FROM #{@@table_name}
-             WHERE session_id_crc = CRC32(#{@@connection.quote(session_id)})
-               AND session_id = #{@@connection.quote(session_id)}
-          end_sql
+          ActiveRecord::Base.connection_pool.with_connection do |connection|
+            connection.delete <<-end_sql, 'Destroy session'
+              DELETE FROM #{@@table_name}
+               WHERE session_id_crc = CRC32(#{connection.quote(session_id)})
+                 AND session_id = #{connection.quote(session_id)}
+            end_sql
+          end
         end
 
       private
